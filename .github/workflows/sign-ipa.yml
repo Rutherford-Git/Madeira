@@ -86,10 +86,11 @@ jobs:
           base64 -d <<< "$PROFILE_HELPER_BASE64" > "$keys/helper.mobileprovision"
           mkdir out
           # Without -e, zsign signs with each profile's entitlements, which for a
-          # development profile include get-task-allow.
+          # development profile include get-task-allow. Without -z it stores the
+          # IPA uncompressed, about four times the release's size.
           zsign -k "$keys/cert.p12" -p "$P12_PASSWORD" \
             -m "$keys/app.mobileprovision" -m "$keys/helper.mobileprovision" \
-            -b "$BUNDLE_ID" -o out/Madeira.ipa upstream.ipa
+            -b "$BUNDLE_ID" -z 6 -o out/Madeira.ipa upstream.ipa
 
       - name: Check the signed app
         id: info
