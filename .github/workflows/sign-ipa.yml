@@ -1,0 +1,239 @@
+# Re-signs a willfaust/Madeira release IPA with your own Apple Development
+# certificate, so it installs on the iPhones registered in your developer
+# account. A development signature keeps get-task-allow, which JIT needs
+# (docs/JIT.md); TestFlight and App Store signatures never have it.
+#
+# Secrets (`bash .github/signing/setup.sh` sets them):
+#   P12_BASE64             Apple Development certificate and key, .p12, base64
+#   P12_PASSWORD           password of that .p12
+#   PROFILE_APP_BASE64     development profile for <bundle_id>, base64
+#   PROFILE_HELPER_BASE64  development profile for <bundle_id>.JITHelper, base64
+#
+# With "publish" on, the signed IPA goes to a release of this repository and
+# GitHub Pages serves an install page for it (Settings > Pages > Source must
+# be "GitHub Actions"). Anyone can download it, but it only installs on the
+# iPhones in the profiles.
+name: Sign IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: willfaust/Madeira release to sign ("latest" or a tag such as v0.1.3)
+        default: latest
+      bundle_id:
+        description: Bundle ID of your App ID (the JIT helper is <bundle_id>.JITHelper)
+        default: com.rutherfordgit.madeira
+      publish:
+        description: Publish an install page for the registered iPhones
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: willfaust/Madeira
+  ZSIGN_VERSION: v1.1.3
+  ZSIGN_SHA256: 323533d2deb04c84149820f6123fa037adb3c2849d3c213833f9a212da219cad
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.fetch.outputs.tag }}
+      version: ${{ steps.info.outputs.version }}
+    steps:
+      - name: Download the release IPA
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$TAG" = latest ]; then
+            TAG=$(gh release view -R "$UPSTREAM" --json tagName --jq .tagName)
+          fi
+          gh release download "$TAG" -R "$UPSTREAM" -p 'Madeira-*.ipa' -p 'Madeira-*.ipa.sha256'
+          sha256sum -c Madeira-*.ipa.sha256
+          mv Madeira-*.ipa upstream.ipa
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install zsign
+        run: |
+          curl -fsSL -o zsign.tar.gz "https://github.com/zhlynn/zsign/releases/download/$ZSIGN_VERSION/zsign-linux-musl-static.tar.gz"
+          echo "$ZSIGN_SHA256  zsign.tar.gz" | sha256sum -c
+          mkdir zsign-bin
+          tar -xzf zsign.tar.gz -C zsign-bin
+          sudo install -m 755 "$(find zsign-bin -type f -name 'zsign*' | head -1)" /usr/local/bin/zsign
+          zsign -v
+
+      - name: Sign
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          PROFILE_APP_BASE64: ${{ secrets.PROFILE_APP_BASE64 }}
+          PROFILE_HELPER_BASE64: ${{ secrets.PROFILE_HELPER_BASE64 }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          for s in P12_BASE64 P12_PASSWORD PROFILE_APP_BASE64 PROFILE_HELPER_BASE64; do
+            [ -n "${!s}" ] || { echo "::error::Secret $s is not set; see the top of sign-ipa.yml"; exit 1; }
+          done
+          keys="$RUNNER_TEMP/keys"
+          mkdir -m 700 "$keys"
+          trap 'rm -rf "$keys"' EXIT
+          base64 -d <<< "$P12_BASE64" > "$keys/cert.p12"
+          base64 -d <<< "$PROFILE_APP_BASE64" > "$keys/app.mobileprovision"
+          base64 -d <<< "$PROFILE_HELPER_BASE64" > "$keys/helper.mobileprovision"
+          mkdir out
+          # Without -e, zsign signs with each profile's entitlements, which for a
+          # development profile include get-task-allow.
+          zsign -k "$keys/cert.p12" -p "$P12_PASSWORD" \
+            -m "$keys/app.mobileprovision" -m "$keys/helper.mobileprovision" \
+            -b "$BUNDLE_ID" -o out/Madeira.ipa upstream.ipa
+
+      - name: Check the signed app
+        id: info
+        env:
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          python3 - out/Madeira.ipa <<'EOF'
+          import os, plistlib, re, sys, zipfile
+
+          ipa = zipfile.ZipFile(sys.argv[1])
+          names = ipa.namelist()
+          app = next(n for n in names if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", n))
+          info = plistlib.loads(ipa.read(app))
+          bundle_id = os.environ["BUNDLE_ID"]
+          if info["CFBundleIdentifier"] != bundle_id:
+              sys.exit(f"::error::bundle ID is {info['CFBundleIdentifier']}, expected {bundle_id}")
+
+          def profile(path):
+              # The profile is CMS-signed; its plist sits inside as plain text.
+              data = ipa.read(path)
+              return plistlib.loads(data[data.index(b"<?xml"):data.index(b"</plist>") + 8])
+
+          bundles = {app.rsplit("/", 1)[0]: bundle_id}
+          for n in names:
+              if re.fullmatch(r"Payload/[^/]+\.app/PlugIns/[^/]+\.appex/Info\.plist", n):
+                  bundles[n.rsplit("/", 1)[0]] = f"{bundle_id}.JITHelper"
+          for folder, expected in bundles.items():
+              path = f"{folder}/embedded.mobileprovision"
+              if path not in names:
+                  sys.exit(f"::error::{folder} has no profile; add a development profile for {expected}")
+              p = profile(path)
+              ent = p["Entitlements"]
+              print(f"{folder}: {p['Name']}, {len(p.get('ProvisionedDevices', []))} device(s), "
+                    f"expires {p['ExpirationDate']:%Y-%m-%d}")
+              if not ent["application-identifier"].endswith("." + expected):
+                  sys.exit(f"::error::{folder} got the profile for {ent['application-identifier']}, expected {expected}")
+              if not ent.get("get-task-allow"):
+                  sys.exit(f"::error::{folder} has no get-task-allow; use a Development profile, not Ad Hoc or App Store")
+              if expected == bundle_id and not ent.get("com.apple.developer.kernel.increased-memory-limit"):
+                  print("::warning::the app profile lacks Increased Memory Limit; enable it on the App ID and regenerate the profile")
+
+          version = info.get("CFBundleShortVersionString", "1.0")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"version={version}\n")
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Madeira-signed
+          path: out/Madeira.ipa
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    if: inputs.publish
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.sign.outputs.tag }}
+      RELEASE: signed-${{ needs.sign.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: Madeira-signed
+
+      - name: Upload the IPA to a release
+        run: |
+          gh release view "$RELEASE" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "$RELEASE" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+              --title "Madeira $TAG, signed for registered iPhones" \
+              --notes "Install it from this repository's GitHub Pages site. It only installs on the iPhones in the developer account's profiles."
+          gh release upload "$RELEASE" Madeira.ipa -R "$GITHUB_REPOSITORY" --clobber
+
+      - id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build the install page
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          VERSION: ${{ needs.sign.outputs.version }}
+        run: |
+          mkdir site
+          python3 - <<'EOF'
+          import html, os, plistlib, urllib.parse
+
+          env = os.environ
+          ipa_url = f"https://github.com/{env['GITHUB_REPOSITORY']}/releases/download/{env['RELEASE']}/Madeira.ipa"
+          manifest_url = f"{env['BASE_URL']}/manifest.plist"
+          manifest = {"items": [{
+              "assets": [{"kind": "software-package", "url": ipa_url}],
+              "metadata": {"bundle-identifier": env["BUNDLE_ID"], "bundle-version": env["VERSION"],
+                           "kind": "software", "title": "Madeira"},
+          }]}
+          with open("site/manifest.plist", "wb") as f:
+              plistlib.dump(manifest, f)
+
+          install = "itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest_url, safe="")
+          jit = "https://github.com/willfaust/Madeira/blob/main/docs/JIT.md"
+          tag = html.escape(env["TAG"])
+          page = f"""<!doctype html>
+          <html lang="en"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Install Madeira</title>
+          <style>
+            :root {{ color-scheme: light dark; --bg: #fff; --fg: #1c1c1e; --muted: #6e6e73; --accent: #0a84ff; }}
+            @media (prefers-color-scheme: dark) {{ :root {{ --bg: #000; --fg: #f2f2f7; --muted: #98989d; }} }}
+            body {{ margin: 0; padding: 32px 16px; background: var(--bg); color: var(--fg);
+                    font: 17px/1.5 -apple-system, system-ui, sans-serif; }}
+            main {{ max-width: 520px; margin: 0 auto; }}
+            h1 {{ font-size: 28px; margin: 0 0 4px; }}
+            .muted {{ color: var(--muted); }}
+            a.button {{ display: block; margin: 24px 0; padding: 14px; border-radius: 12px; text-align: center;
+                        background: var(--accent); color: #fff; font-weight: 600; text-decoration: none; }}
+            li {{ margin-bottom: 10px; }}
+          </style></head>
+          <body><main>
+          <h1>Madeira</h1>
+          <p class="muted">{tag}, signed for the iPhones registered in this developer account.</p>
+          <ol>
+            <li>Use an iPhone on iOS 26 or later whose UDID is registered. Other iPhones say it cannot be installed.</li>
+            <li>Turn on Settings &rsaquo; Privacy &amp; Security &rsaquo; Developer Mode, then restart when asked.</li>
+            <li>Open this page in Safari and tap Install.</li>
+            <li>If iOS says the developer is untrusted, trust it in Settings &rsaquo; General &rsaquo; VPN &amp; Device Management.</li>
+            <li>Set up JIT, which games need: <a href="{jit}">JIT setup</a>.</li>
+          </ol>
+          <a class="button" href="{html.escape(install)}">Install Madeira</a>
+          </main></body></html>
+          """
+          with open("site/index.html", "w") as f:
+              f.write(page)
+          EOF
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
