@@ -31,8 +31,8 @@ permissions:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-  LLVM_MINGW: llvm-mingw-20260421-ucrt-macos-universal
-  LLVM_MINGW_SHA256: bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7
+  LLVM_MINGW_DIST: llvm-mingw-20260421-ucrt-macos-universal
+  LLVM_MINGW_DIST_SHA256: bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7
 
 jobs:
   dxmt:
@@ -109,8 +109,8 @@ jobs:
       - name: llvm-mingw
         run: |
           curl -fsSL --retry 3 -o /tmp/llvm-mingw.tar.xz \
-            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW.tar.xz"
-          echo "$LLVM_MINGW_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW_DIST.tar.xz"
+          echo "$LLVM_MINGW_DIST_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
           mkdir -p toolchains
           tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
 
@@ -231,8 +231,8 @@ jobs:
         if: steps.farm.outputs.cache-hit != 'true'
         run: |
           curl -fsSL --retry 3 -o /tmp/llvm-mingw.tar.xz \
-            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW.tar.xz"
-          echo "$LLVM_MINGW_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW_DIST.tar.xz"
+          echo "$LLVM_MINGW_DIST_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
           mkdir -p toolchains
           tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
 
