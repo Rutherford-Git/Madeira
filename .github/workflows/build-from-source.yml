@@ -206,6 +206,10 @@ jobs:
             build/fex-ios/build.sh > build/fex-ios/build-ci.sh
           grep -q CMAKE_SYSTEM_PROCESSOR=arm64 build/fex-ios/build-ci.sh
           bash build/fex-ios/build-ci.sh
+          # The app also links libJemallocLibs.a, a target of its own that the
+          # script's FEXCore targets do not pull in.
+          cmake --build FEX/build-ios --target JemallocLibs
+          ls FEX/build-ios/FEXCore/Source/libJemallocLibs.a
 
       - name: Inputs the project expects
         run: |
