@@ -198,8 +198,11 @@ jobs:
       - name: FEX for iOS
         run: |
           # CMake 4 leaves CMAKE_SYSTEM_PROCESSOR empty for an iOS cross build,
-          # and FEX's CMakeLists rejects an empty processor. Same script, with it set.
-          sed 's/-DCMAKE_SYSTEM_NAME=iOS /-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 /' \
+          # and FEX's CMakeLists rejects an empty processor. Its default
+          # TUNE_CPU=native reads the build host's /proc/cpuinfo, which macOS
+          # lacks (and the host is not the iPhone): tune for the A13, the oldest
+          # chip iOS 26 runs on. Same script, with both set.
+          sed 's/-DCMAKE_SYSTEM_NAME=iOS /-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DTUNE_CPU=apple-a13 /' \
             build/fex-ios/build.sh > build/fex-ios/build-ci.sh
           grep -q CMAKE_SYSTEM_PROCESSOR=arm64 build/fex-ios/build-ci.sh
           bash build/fex-ios/build-ci.sh
