@@ -1,7 +1,8 @@
-# Re-signs a willfaust/Madeira release IPA with your own Apple Development
-# certificate, so it installs on the iPhones registered in your developer
-# account. A development signature keeps get-task-allow, which JIT needs
-# (docs/JIT.md); TestFlight and App Store signatures never have it.
+# Re-signs a willfaust/Madeira release IPA, or an IPA build-from-source.yml
+# built, with your own Apple Development certificate, so it installs on the
+# iPhones registered in your developer account. A development signature keeps
+# get-task-allow, which JIT needs (docs/JIT.md); TestFlight and App Store
+# signatures never have it.
 #
 # Secrets (`bash .github/signing/setup.sh` sets them):
 #   P12_BASE64             Apple Development certificate and key, .p12, base64
@@ -28,6 +29,22 @@ on:
         description: Publish an install page for the registered iPhones
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      ipa_artifact:
+        description: Artifact of the calling run that holds the unsigned IPA
+        type: string
+        required: true
+      label:
+        description: What the build is called in its release (signed-<label>)
+        type: string
+        required: true
+      bundle_id:
+        type: string
+        default: com.rutherfordgit.madeira
+      publish:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,11 +58,19 @@ jobs:
   sign:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.fetch.outputs.tag }}
+      tag: ${{ steps.fetch.outputs.tag || inputs.label }}
       version: ${{ steps.info.outputs.version }}
     steps:
+      - name: Download the built IPA
+        if: inputs.ipa_artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.ipa_artifact }}
+          path: built
+
       - name: Download the release IPA
         id: fetch
+        if: inputs.ipa_artifact == ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
@@ -55,8 +80,12 @@ jobs:
           fi
           gh release download "$TAG" -R "$UPSTREAM" -p 'Madeira-*.ipa' -p 'Madeira-*.ipa.sha256'
           sha256sum -c Madeira-*.ipa.sha256
-          mv Madeira-*.ipa upstream.ipa
+          mv Madeira-*.ipa input.ipa
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Use the built IPA
+        if: inputs.ipa_artifact != ''
+        run: mv built/*.ipa input.ipa
 
       - name: Install zsign
         run: |
@@ -90,7 +119,7 @@ jobs:
           # IPA uncompressed, about four times the release's size.
           zsign -k "$keys/cert.p12" -p "$P12_PASSWORD" \
             -m "$keys/app.mobileprovision" -m "$keys/helper.mobileprovision" \
-            -b "$BUNDLE_ID" -z 6 -o out/Madeira.ipa upstream.ipa
+            -b "$BUNDLE_ID" -z 6 -o out/Madeira.ipa input.ipa
 
       - name: Check the signed app
         id: info

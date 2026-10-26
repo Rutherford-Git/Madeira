@@ -1,0 +1,246 @@
+# Builds Madeira from this repository's source (docs/BUILDING.md), then signs
+# it with sign-ipa.yml for the iPhones in your development profiles.
+#
+#   dxmt    LLVM for iOS (cached after the first run, which takes about an
+#           hour) and DXMT's unix side -> libdxmt_combined.a
+#   native  GnuTLS headers, FFmpeg, FreeType, the configured Wine tree, Wine's
+#           unix side (ntdll, wineserver, win32u) and in-app pairing (Rust)
+#   app     FEX for iOS and the Xcode app (Debug: the configuration that runs
+#           games), packaged as an unsigned IPA
+#   sign    sign-ipa.yml, optionally publishing the install page
+#
+# The Windows-side DLLs (app/Madeira/arm64ec-windows and aarch64-windows) are
+# the ones committed in the repository; this does not rebuild them.
+name: Build from source
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Bundle ID of your App ID (the JIT helper is <bundle_id>.JITHelper)
+        default: com.rutherfordgit.madeira
+      publish:
+        description: Publish an install page for the registered iPhones
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  LLVM_MINGW: llvm-mingw-20260421-ucrt-macos-universal
+  LLVM_MINGW_SHA256: bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7
+
+jobs:
+  dxmt:
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - name: DXMT submodule
+        run: git submodule update --init --recursive --depth 1 dxmt
+
+      - name: Restore LLVM for iOS
+        id: llvm
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            toolchains/llvm-ios-build/lib
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-project/llvm/include
+          key: llvm-ios-${{ hashFiles('.github/ci/build-llvm-ios.sh') }}-xcode26.6
+
+      - name: Build LLVM for iOS
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: bash .github/ci/build-llvm-ios.sh
+
+      - name: Save LLVM for iOS
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            toolchains/llvm-ios-build/lib
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-project/llvm/include
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+
+      - name: Metal toolchain
+        # Xcode 26 downloads the Metal compiler separately; DXMT compiles its
+        # command shaders with it.
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: DXMT unix side
+        run: bash build/dxmt-ios/build.sh
+
+      - name: Combine with LLVM
+        run: bash .github/ci/combine-dxmt.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lib-dxmt
+          path: app/Madeira/libdxmt_combined.a
+          retention-days: 7
+
+  native:
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Wine submodule
+        run: git submodule update --init --depth 1 wine
+
+      - name: Host tools
+        run: |
+          brew install bison gnutls freetype pkgconf
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          # llvm-objcopy for build/wineserver/build.sh's symbol renames, without
+          # putting Homebrew's clang ahead of Xcode's.
+          mkdir -p "$HOME/llvm-tools"
+          ln -sf "$(brew --prefix llvm@20)/bin/llvm-objcopy" "$HOME/llvm-tools/llvm-objcopy"
+          echo "$HOME/llvm-tools" >> "$GITHUB_PATH"
+          rustup target add aarch64-apple-ios
+
+      - name: llvm-mingw
+        run: |
+          curl -fsSL --retry 3 -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
+          mkdir -p toolchains
+          tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
+
+      # Each piece runs on even if one before it failed, so one run shows every
+      # failure; the last step stops the job when anything is missing.
+      - name: GnuTLS (headers for the crypto unix libraries)
+        continue-on-error: true
+        run: bash build/gnutls-ios/build.sh
+
+      - name: FFmpeg
+        continue-on-error: true
+        run: bash build/ffmpeg/build.sh || { tail -40 build/ffmpeg/obj/*.log; exit 1; }
+
+      - name: FreeType
+        continue-on-error: true
+        run: |
+          git clone -q --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git research/freetype
+          bash build/freetype-ios/build.sh
+
+      - name: Configure Wine
+        continue-on-error: true
+        run: bash .github/ci/configure-wine.sh
+
+      - name: ntdll unix side
+        continue-on-error: true
+        run: bash build/ntdll-unix/build.sh || { for f in build/ntdll-unix/obj/*.err; do [ -s "$f" ] && { echo "== $f"; head -20 "$f"; }; done; exit 1; }
+
+      - name: wineserver
+        continue-on-error: true
+        run: |
+          bash .github/ci/wineserver-base.sh
+          bash build/wineserver/build.sh || { for f in build/wineserver/obj/err-*.txt; do [ -s "$f" ] && { echo "== $f"; head -20 "$f"; }; done; exit 1; }
+
+      - name: win32u unix side
+        continue-on-error: true
+        run: bash build/win32u-unix/build.sh || { for f in build/win32u-unix/obj/*.err; do [ -s "$f" ] && { echo "== $f"; head -20 "$f"; }; done; exit 1; }
+
+      - name: In-app pairing (Rust)
+        continue-on-error: true
+        run: bash build/rppairing-ios/build.sh
+
+      - name: Everything the app links is here
+        run: |
+          missing=0
+          for f in libntdll_unix libwineserver libwin32u_unix libmadeira_rppairing \
+                   libavformat libavcodec libswresample libavutil; do
+            if [ -f "app/Madeira/$f.a" ]; then
+              echo "ok      $f.a ($(wc -c < "app/Madeira/$f.a" | tr -d ' ') bytes)"
+            else
+              echo "::error::app/Madeira/$f.a was not built"; missing=1
+            fi
+          done
+          exit $missing
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lib-native
+          path: |
+            app/Madeira/libntdll_unix.a
+            app/Madeira/libwineserver.a
+            app/Madeira/libwin32u_unix.a
+            app/Madeira/libmadeira_rppairing.a
+            app/Madeira/libavformat.a
+            app/Madeira/libavcodec.a
+            app/Madeira/libswresample.a
+            app/Madeira/libavutil.a
+            app/Madeira/legal/LICENSES-rppairing-crates.txt
+          retention-days: 7
+
+  app:
+    needs: [dxmt, native]
+    runs-on: macos-26
+    timeout-minutes: 120
+    outputs:
+      label: ${{ steps.label.outputs.label }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: FEX submodule
+        run: git submodule update --init --recursive --depth 1 FEX
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: lib-*
+          path: app/Madeira
+          merge-multiple: true
+
+      - name: FEX for iOS
+        run: bash build/fex-ios/build.sh
+
+      - name: Inputs the project expects
+        run: |
+          # The app's .metal sources need Xcode 26's separately downloaded compiler.
+          xcodebuild -downloadComponent MetalToolchain
+          # The VC++ runtime is Microsoft's and not redistributed here; the
+          # project's folder reference only needs the folder.
+          mkdir -p app/Madeira/x86_64-vcruntime
+          bash build/stage-licenses.sh
+
+      - name: Build the app (Debug)
+        run: |
+          set -o pipefail
+          xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -configuration Debug \
+            -destination 'generic/platform=iOS' -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            build 2>&1 | tee build/xcodebuild.log | grep -E "error:|warning: unable|\*\* BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build/xcodebuild.log || { grep -B2 -A8 "error:" build/xcodebuild.log | head -150; exit 1; }
+
+      - name: Package the unsigned IPA
+        run: |
+          app=build/DerivedData/Build/Products/Debug-iphoneos/Madeira.app
+          rm -rf Payload && mkdir Payload && cp -R "$app" Payload/
+          rm -rf Payload/Madeira.app/wine-mono
+          zip -qry -9 Madeira-unsigned.ipa Payload
+          ls -l Madeira-unsigned.ipa
+
+      - id: label
+        run: echo "label=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Madeira-unsigned
+          path: Madeira-unsigned.ipa
+          compression-level: 0
+          retention-days: 7
+
+  sign:
+    needs: app
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/sign-ipa.yml
+    with:
+      ipa_artifact: Madeira-unsigned
+      label: ${{ needs.app.outputs.label }}
+      bundle_id: ${{ inputs.bundle_id }}
+      publish: ${{ inputs.publish }}
+    secrets: inherit
