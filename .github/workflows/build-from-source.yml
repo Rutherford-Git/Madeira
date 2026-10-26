@@ -71,7 +71,7 @@ jobs:
         run: xcodebuild -downloadComponent MetalToolchain
 
       - name: DXMT unix side
-        run: bash build/dxmt-ios/build.sh
+        run: bash build/dxmt-ios/build.sh || { for f in build/dxmt-ios/obj/*.err; do [ -s "$f" ] && grep -q "error:" "$f" && { echo "== $f"; grep -B2 -A6 "error:" "$f" | head -60; }; done; exit 1; }
 
       - name: Combine with LLVM
         run: bash .github/ci/combine-dxmt.sh
