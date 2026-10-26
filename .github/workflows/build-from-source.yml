@@ -70,6 +70,9 @@ jobs:
         # command shaders with it.
         run: xcodebuild -downloadComponent MetalToolchain
 
+      - name: DXMT's AIR shader headers
+        run: bash .github/ci/dxmt-air-headers.sh
+
       - name: DXMT unix side
         run: bash build/dxmt-ios/build.sh || { for f in build/dxmt-ios/obj/*.err; do [ -s "$f" ] && grep -q "error:" "$f" && { echo "== $f"; grep -B2 -A6 "error:" "$f" | head -60; }; done; exit 1; }
 
