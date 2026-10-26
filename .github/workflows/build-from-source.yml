@@ -4,13 +4,15 @@
 #   dxmt    LLVM for iOS (cached after the first run, which takes about an
 #           hour) and DXMT's unix side -> libdxmt_combined.a
 #   native  GnuTLS headers, FFmpeg, FreeType, the configured Wine tree, Wine's
-#           unix side (ntdll, wineserver, win32u) and in-app pairing (Rust)
+#           unix side (ntdll, wineserver, win32u), in-app pairing (Rust), the
+#           ignored aarch64 service programs and Madeira Dock
+#   wow64   the i386 farm for 32-bit programs (cached; a whole Wine build)
 #   app     FEX for iOS and the Xcode app (Debug: the configuration that runs
 #           games), packaged as an unsigned IPA
 #   sign    sign-ipa.yml, optionally publishing the install page
 #
-# The Windows-side DLLs (app/Madeira/arm64ec-windows and aarch64-windows) are
-# the ones committed in the repository; this does not rebuild them.
+# The other Windows-side DLLs (app/Madeira/arm64ec-windows and aarch64-windows)
+# are the ones committed in the repository; this does not rebuild them.
 name: Build from source
 
 on:
@@ -90,8 +92,8 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-      - name: Wine submodule
-        run: git submodule update --init --depth 1 wine
+      - name: Wine and Madeira Dock submodules
+        run: git submodule update --init --depth 1 wine madeira-dock
 
       - name: Host tools
         run: |
@@ -150,15 +152,25 @@ jobs:
         continue-on-error: true
         run: bash build/rppairing-ios/build.sh
 
-      - name: Everything the app links is here
+      - name: Wine's aarch64 service programs
+        continue-on-error: true
+        run: bash .github/ci/wine-aarch64-programs.sh
+
+      - name: Madeira Dock (starts Steam games through Valve's client)
+        continue-on-error: true
+        run: bash build/madeira-dock/build.sh
+
+      - name: Everything the app needs from here is built
         run: |
           missing=0
-          for f in libntdll_unix libwineserver libwin32u_unix libmadeira_rppairing \
-                   libavformat libavcodec libswresample libavutil; do
-            if [ -f "app/Madeira/$f.a" ]; then
-              echo "ok      $f.a ($(wc -c < "app/Madeira/$f.a" | tr -d ' ') bytes)"
+          for f in libntdll_unix.a libwineserver.a libwin32u_unix.a libmadeira_rppairing.a \
+                   libavformat.a libavcodec.a libswresample.a libavutil.a \
+                   aarch64-windows/winedevice.exe aarch64-windows/svchost.exe \
+                   aarch64-windows/plugplay.exe arm64ec-windows/dockhost.exe; do
+            if [ -f "app/Madeira/$f" ]; then
+              echo "ok      $f ($(wc -c < "app/Madeira/$f" | tr -d ' ') bytes)"
             else
-              echo "::error::app/Madeira/$f.a was not built"; missing=1
+              echo "::error::app/Madeira/$f was not built"; missing=1
             fi
           done
           exit $missing
@@ -176,10 +188,73 @@ jobs:
             app/Madeira/libswresample.a
             app/Madeira/libavutil.a
             app/Madeira/legal/LICENSES-rppairing-crates.txt
+            app/Madeira/aarch64-windows/winedevice.exe
+            app/Madeira/aarch64-windows/svchost.exe
+            app/Madeira/aarch64-windows/plugplay.exe
+            app/Madeira/arm64ec-windows/dockhost.exe
+            app/Madeira/arm64ec-windows/dock-notices.txt
+          retention-days: 7
+
+  # The 32-bit Windows farm WoW64 sessions load (docs/WOW64.md): every i386
+  # Wine module plus DXMT's i386 DLLs. A whole Wine build, so it is cached on
+  # the Wine and DXMT commits and the script that builds it.
+  wow64:
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache key
+        id: key
+        run: echo "key=i386-farm-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:dxmt)-${{ hashFiles('build/wine-i386/build.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the i386 farm
+        id: farm
+        uses: actions/cache/restore@v6
+        with:
+          path: app/Madeira/i386-windows
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Wine and DXMT submodules
+        if: steps.farm.outputs.cache-hit != 'true'
+        run: |
+          git submodule update --init --depth 1 wine
+          git submodule update --init --recursive --depth 1 dxmt
+
+      - name: Host tools
+        if: steps.farm.outputs.cache-hit != 'true'
+        run: |
+          brew install bison meson
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+
+      - name: llvm-mingw
+        if: steps.farm.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o /tmp/llvm-mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260421/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  /tmp/llvm-mingw.tar.xz" | shasum -a 256 -c
+          mkdir -p toolchains
+          tar -xJf /tmp/llvm-mingw.tar.xz -C toolchains
+
+      - name: i386 farm
+        if: steps.farm.outputs.cache-hit != 'true'
+        run: bash build/wine-i386/build.sh || { grep -E "error:|Error " wine/build-i386/madeira-i386-build.log | head -60; exit 1; }
+
+      - name: Save the i386 farm
+        if: steps.farm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: app/Madeira/i386-windows
+          key: ${{ steps.key.outputs.key }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: farm-i386
+          path: app/Madeira/i386-windows
           retention-days: 7
 
   app:
-    needs: [dxmt, native]
+    needs: [dxmt, native, wow64]
     runs-on: macos-26
     timeout-minutes: 120
     outputs:
@@ -194,6 +269,11 @@ jobs:
           pattern: lib-*
           path: app/Madeira
           merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: farm-i386
+          path: app/Madeira/i386-windows
 
       - name: FEX for iOS
         run: |
