@@ -1,4 +1,6 @@
 #!/bin/bash
+# Portions copyright 2026 thebcd69 (BCD): code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 # Build madeira_d3d12.dll as ARM64EC, plus the x64 test executable.
 #
 # A SEPARATE DLL, not a replacement for the bundled d3d12.dll: the design says
@@ -17,7 +19,11 @@ mkdir -p "$OUT"
 # the vtables the wrong length.
 python3 "$SRC/gen_vtables.py" \
     "$REPO_ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/generic-w64-mingw32/include/d3d12.h" \
-    "$SRC/madeira_d3d12_stubs.h" >/dev/null
+    "$OUT/madeira_d3d12_stubs.h" >/dev/null
+cmp -s "$OUT/madeira_d3d12_stubs.h" "$SRC/madeira_d3d12_stubs.h" || {
+    echo "D3D12 stubs differ from the pinned headers; regenerate and review the source header" >&2
+    exit 1
+}
 
 # Build-time inputs of madeira_d3d12.c, all optional: without them the runtime
 # falls back as noted below.
@@ -57,25 +63,47 @@ if [ -n "${MAD_BUILD_ID:-}" ]; then EXTRA+=(-DMAD_BUILD_ID="\"$MAD_BUILD_ID\"");
 # texture-buffer probe and/or the clear functions when those do not compile,
 # so the other kernels never depend on them.
 echo "=== helper kernels (metallib) ==="
+MAD_KERNELS_FLAGS=""   # the -D flags of the compile that succeeded (the iOS 18 copy below uses them too)
 mad_kernels_metal() {
-    xcrun -sdk iphoneos metal -std=metal3.0 "$@" -o "$OUT/mad_kernels.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels.err"
+    xcrun -sdk iphoneos metal -std=metal3.0 "$@" -o "$OUT/mad_kernels.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels.err" &&
+        MAD_KERNELS_FLAGS="$*"
 }
 if command -v xcrun > /dev/null 2>&1 &&
    { mad_kernels_metal ||
+     mad_kernels_metal -DMAD_NO_NAN_CLEAN ||
      mad_kernels_metal -DMAD_NO_TEXBUF_PROBE ||
      mad_kernels_metal -DMAD_NO_CLEAR_RECTS ||
-     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS; }; then
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS ||
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS -DMAD_NO_NAN_CLEAN; }; then
     (cd "$OUT" && xxd -i mad_kernels.metallib > mad_kernels_metallib.h)
     EXTRA+=(-DMAD_HAVE_KERNELS -I"$OUT")
     echo "  $(wc -c < "$OUT/mad_kernels.metallib" | tr -d ' ') bytes"
+    # The same kernels for iOS 18 (AIR 2.7): the library above takes the SDK's
+    # default target (AIR 2.8 with the iOS 26 SDK), which iOS 18 refuses. The
+    # runtime loads this copy only when the first is refused (madeira_d3d12.c).
+    if xcrun -sdk iphoneos metal -std=metal3.0 --target=air64-apple-ios18.0 $MAD_KERNELS_FLAGS \
+           -o "$OUT/mad_kernels_ios18.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels_ios18.err"; then
+        (cd "$OUT" && xxd -i mad_kernels_ios18.metallib > mad_kernels_ios18_metallib.h)
+        EXTRA+=(-DMAD_HAVE_KERNELS_IOS18)
+        echo "  iOS 18 copy: $(wc -c < "$OUT/mad_kernels_ios18.metallib" | tr -d ' ') bytes"
+    else
+        echo "  the iOS 18 copy did not build -- iOS 18 runs without the helper kernels, as before"
+        head -20 "$OUT/mad_kernels_ios18.err" 2> /dev/null || true
+    fi
 else
     echo "  helper kernels did not build -- what needs them is skipped"
     head -20 "$OUT/mad_kernels.err" 2> /dev/null || true
+    [ "${MADEIRA_REQUIRE_KERNELS:-0}" != 1 ] || exit 1
 fi
 
 echo "=== madeira_d3d12.dll (arm64ec) ==="
+# ml1310: DXMT's BCn decoders, for BC uploads on GPUs without BC sampling.
+for cpp in "$SRC/mad_bcn.cpp" "$REPO_ROOT/dxmt/src/dxmt/dxmt_bcn.cpp"; do
+    "$MINGW/arm64ec-w64-mingw32-clang++" -c -O2 -std=c++17 -fno-exceptions -fno-rtti \
+        -I"$REPO_ROOT/dxmt/src/dxmt" -o "$OUT/$(basename "$cpp" .cpp).o" "$cpp"
+done
 "$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall ${EXTRA[@]+"${EXTRA[@]}"} \
-    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$SRC/d3d12.def" \
+    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$OUT/mad_bcn.o" "$OUT/dxmt_bcn.o" "$SRC/d3d12.def" \
     -I"$SRC" -I"$REPO_ROOT/madeira-d3d12/src" -I"$REPO_ROOT/dxmt/src/winemetal" \
     -L"$REPO_ROOT/dxmt/build-arm64ec/src/winemetal" -lwinemetal \
     -luuid -lole32

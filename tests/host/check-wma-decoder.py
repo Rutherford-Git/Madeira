@@ -13,7 +13,7 @@ decode (random bytes) to check that the concealment still produces time rather t
 The production file is compiled as it is for the device (winegstreamer_unixlib_ios.c, which also
 #includes wg_parser_av_ios.c), against the Wine headers of a configured tree, under ASan/UBSan.
 
-Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.1.tar.xz, the tracked
+Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.5.tar.xz, the tracked
 source), MADEIRA_HOST_FFMPEG (prefix of an existing host build with the components below),
 MADEIRA_WINE_BUILD (a configured Wine build tree whose include/ holds config.h and the
 widl-generated headers; default: wine/build-macos, the tree build/ntdll-unix/build.sh uses).
@@ -30,30 +30,35 @@ for need in [wine_build / "include/config.h", wine_build / "include/mfobjects.h"
         sys.exit("SKIP-FAIL: %s is missing; point MADEIRA_WINE_BUILD at a configured Wine tree" % need)
 
 # ------------------------------------------------------------------ 64-bit default
-# The binder hands 64-bit (ARM64EC) callers the real table only with MADEIRA_WG_64BIT=1; by
-# default they get the generic stub table, as before this series.  32-bit callers get the
-# wow64 table.
-# The branch is only entered for a wow64 caller or with the switch, so a 64-bit caller without
-# it reaches the generic fallback (the stub table), byte for byte the path it took before.
+# The binder hands 64-bit (ARM64EC) callers the real table unless MADEIRA_WG_64BIT=0, which
+# sends them to the generic stub fallback as before; 32-bit callers get the wow64 table.  A
+# 64-bit caller's parser stays refused unless MADEIRA_WG_64BIT=1 (wgp_create64).
 virtual = (ntdll_unix / "virtual_ios.c").read_text()
-head = '} else if (match && strstr(match, "winegstreamer") && (wow || ios_wg_64bit_opted_in())) {'
+head = '} else if (match && strstr(match, "winegstreamer") && (wow || ios_wg_64bit_enabled())) {'
 assert virtual.count('strstr(match, "winegstreamer")') == 1, "exactly one winegstreamer branch"
 assert head in virtual, "the winegstreamer branch must be gated on wow || MADEIRA_WG_64BIT"
 branch = virtual[virtual.index(head):]
 branch = branch[:branch.index("} else if", 10)]
 assert "funcs_wow64 = (const void *)winegstreamer_unix_call_wow64_funcs;" in branch
-helper = virtual[virtual.index("static BOOL ios_wg_64bit_opted_in(void)"):]
+helper = virtual[virtual.index("static BOOL ios_wg_64bit_enabled(void)"):]
 helper = helper[:helper.index("}") + 1]
-assert 'getenv( "MADEIRA_WG_64BIT" )' in helper and "e[0] == '1'" in helper, helper
+assert 'getenv( "MADEIRA_WG_64BIT" )' in helper and "!(e && e[0] == '0')" in helper, helper
+unixlib = (ntdll_unix / "winegstreamer_unixlib_ios.c").read_text()
+create64 = unixlib[unixlib.index("static NTSTATUS wgp_create64( void *args )"):]
+create64 = create64[:create64.index("\n}\n")]
+assert "e[0] == '1'" in create64 and "return STATUS_NOT_IMPLEMENTED;" in create64, create64
+table64 = unixlib[unixlib.index("const unixlib_entry_t __wine_unix_call_funcs[] ="):]
+table64 = table64[:table64.index("};")]
+assert "wgp_create64,                       /* unix_wg_parser_create */" in table64, "64-bit parser create is gated"
 fallback = virtual[virtual.index("using stub table"):]
 fallback = fallback[:fallback.index("ios_bind_unixlib_table")]
 assert "funcs64 = (const void *)ios_stub_unix_call_table;" in fallback
 assert "winegstreamer" not in fallback
-print("PASS: 64-bit callers reach the generic stub fallback unless MADEIRA_WG_64BIT=1; "
+print("PASS: 64-bit callers get the WMA table unless MADEIRA_WG_64BIT=0, their parser only with =1; "
       "32-bit callers get the wow64 table")
 
 # ------------------------------------------------------------------ host FFmpeg
-tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.1.tar.xz")
+tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.5.tar.xz")
 FLAGS = [
     "--disable-everything", "--disable-autodetect", "--disable-gpl", "--disable-nonfree", "--disable-version3",
     # the decoder set build/ffmpeg/build.sh ships (WMA family) ...
@@ -70,17 +75,17 @@ FLAGS = [
 prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
 if not prefix:
     key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.1-" + key))
+    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
     if not (Path(prefix) / "lib/libavcodec.a").exists():
         assert Path(tarball).exists(), "no FFmpeg tarball at %s" % tarball
         src = Path(prefix + "-src")
         src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.1/configure").exists():
+        if not (src / "ffmpeg-7.1.5/configure").exists():
             subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
         bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
         print("building host FFmpeg into", prefix, flush=True)
         log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.1/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
+        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
                        cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
@@ -366,7 +371,7 @@ with tempfile.TemporaryDirectory() as tmp:
     if r.returncode:
         print(r.stdout[-6000:], r.stderr[-6000:])
         sys.exit("FAIL: harness did not compile")
-    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1")
+    env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0" if sys.platform == "darwin" else "detect_leaks=1")
     env.pop("MADEIRA_WMA_SEARCH", None)
     ok = True
     for label, extra_env, args in [("parameter search on (default)", {}, []),

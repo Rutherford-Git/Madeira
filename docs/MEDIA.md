@@ -15,12 +15,12 @@ three things that Windows programs use every day have no decoder:
 This port supplies that unix side in `libntdll_unix.a`, bound by name in
 `load_builtin_unixlib()` (`build/ntdll-unix/virtual_ios.c`).
 
-**By default only 32-bit (WoW64) processes get it.** A 64-bit (ARM64EC)
-process gets the generic stub table, which is what every module without a
-unix side gets and what `winegstreamer` got before this code existed, so the
-64-bit engine behaves exactly as it did. `MADEIRA_WG_64BIT=1` opts 64-bit
-processes in (they also need an arm64ec `winegstreamer.dll`, which is not
-shipped).
+**32-bit (WoW64) and 64-bit (ARM64EC) processes both get it.** The ARM64EC
+farm ships `winegstreamer.dll` and `wmadmod.dll`, so an x64 program's xWMA
+voices (XAudio2/FAudio's WMA decoder DMO) decode instead of playing silence.
+A 64-bit process gets the WMA transform only: its `wg_parser` (quartz / Media
+Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
+`MADEIRA_WG_64BIT=0` gives 64-bit processes the generic stub table again.
 
 ## Pieces
 
@@ -30,7 +30,7 @@ shipped).
 | `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov), MPEG audio / PCM decode through libavcodec + libswresample, a packet queue, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c` / `media_source.c` ask for. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
-| `build/ffmpeg/build.sh` | FFmpeg 7.1.1, pinned by SHA-256, LGPL-only configuration. |
+| `build/ffmpeg/build.sh` | FFmpeg 7.1.5, pinned by SHA-256, LGPL-only configuration. |
 
 FFmpeg is built with no H.264, HEVC or AAC decoder or parser: those streams go
 to the platform decoders. See `THIRD-PARTY-NOTICES.md` for the exact component
@@ -50,7 +50,7 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MADEIRA_WG_64BIT` | off | `1`: 64-bit processes get the real unix side too (see above). |
+| `MADEIRA_WG_64BIT` | WMA only | `0`: 64-bit processes get the stub table again; `1`: their `wg_parser` too (see above). |
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
 | `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV is refused at connect. |
 | `MADEIRA_WG_VIDEO_FORMAT` | `nv12` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32`. |

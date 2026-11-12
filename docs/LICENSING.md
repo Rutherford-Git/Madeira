@@ -16,7 +16,7 @@ Statically linked into the main executable (`Madeira` / `Madeira.debug.dylib`):
 | DXMT unix side + airconv (`libdxmt_combined.a`) | MIT | GPL-3.0-or-later + additional permission | statically linked |
 | LLVM (inside `libdxmt_combined.a`) | Apache-2.0 with LLVM exception | none | statically linked |
 | gnutls 3.8.9, nettle 3.10.1, hogweed 3.10.1, gmp 6.3.0 | LGPL-2.1+ / dual LGPL-3+ or GPL-2+ / dual LGPL-3+ or GPL-2+ | none; Madeira elects LGPL-3.0-or-later for the dual-licensed three | statically linked; LGPL obligations apply; sources tracked in build/gnutls-ios/src |
-| FFmpeg 7.1.1 (libavformat, libavcodec, libavutil, libswresample) | LGPL-2.1-or-later (built `--disable-gpl --disable-nonfree --disable-version3`) | none | statically linked, winegstreamer's unix side only; LGPL obligations apply; the unmodified release tarball is tracked in `build/ffmpeg/src` with its SHA-256 and built by `build/ffmpeg/build.sh` |
+| FFmpeg 7.1.5 (libavformat, libavcodec, libavutil, libswresample) | LGPL-2.1-or-later (built `--disable-gpl --disable-nonfree --disable-version3`) | none | statically linked, winegstreamer's unix side only; LGPL obligations apply; the unmodified release tarball is tracked in `build/ffmpeg/src` with its SHA-256 and built by `build/ffmpeg/build.sh` |
 | Madeira app (Swift/ObjC), native D3D12 runtime (`madeira_d3d12.dll`, PE) | GPL-3.0-or-later + additional permission | author-owned | |
 | Steam sign-in, owned library and downloads (`app/Madeira/SwiftSteam/`) | derived from Jfishin's Madeira Steam client | GPL-3.0-or-later + additional permission, Copyright 2026 Jfishin, 125hz | Jfishin's permission: Madeira Discord server, 2026-09-22 ("do whatever you want with it"), seen by Will Faust in that server; he also confirmed that he wrote the depot downloader himself; per-file audit in `docs/STEAM_SIGNIN.md` and `docs/STEAM_LIBRARY.md` |
 | Zstandard educational decoder (`app/Madeira/SwiftSteam/zstd_edu.c`) | BSD-3-Clause or GPL-2.0 (Meta Platforms) | BSD-3-Clause selected; wrapper by Jfishin | licence text in `LICENSES/ZSTD-BSD.txt` |
@@ -29,8 +29,13 @@ plugins):
 |---|---|---|
 | `libmetalirconverter.dylib` (Apple Metal Shader Converter) | Apple proprietary; agreement s.2.B permits distribution solely for shader conversion; tracked in the repository (decision 2026-09-16) with the agreement and NOTICE beside it | loaded with dlopen by the DXMT/Madeira unix side; used only to convert DXIL to Metal libraries |
 | Apple system frameworks (Metal, Foundation, UIKit, VideoToolbox, CoreMedia, CoreVideo, AudioToolbox, ...) | Apple OS components | GPL-3 "System Library" |
-| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle |
+| `gl/libOSMesa.dylib`: Mesa 25.0.7 OSMesa + Zink + softpipe (desktop OpenGL backend) | MIT and other permissive licences (`licenses/Mesa-license.rst`) | built by `build/mesa-ios/build.sh`; Madeira's patches to Mesa (`build/mesa-ios/patches`) are offered under MIT |
+| `gl/libMoltenVK.dylib`: MoltenVK 1.4.2, containing SPIRV-Cross, SPIRV-Tools, cereal | Apache-2.0 (cereal BSD-3-Clause); texts in `licenses/` | built by `build/moltenvk-ios/build.sh`, unmodified; Apache-2.0 is compatible with GPL-3.0 |
+| PE DLLs in `arm64ec-windows/` (Wine builtins, FEX `libarm64ecfex.dll`, `d3d12.dll`, `winemetal.dll`) | as their sources above | separate files in the bundle; `opengl32.dll` is built with `patches/wine-opengl-winios.patch` applied |
+| `compat/love/lua51.dll`: LuaJIT 2.1 (x86-64 PE) | MIT (`licenses/LuaJIT-MIT.txt`) | unmodified, built by `build/luajit-x64/build.sh`; loaded in place of an incompatible x64 `lua51.dll` (game files are not modified) |
 | `arm64ec-windows/dockhost.exe` (Madeira Dock, when built) | GPL-3.0-or-later + additional permission, Copyright 2026 125hz; statically linked LLVM/MinGW-w64 runtime under their own notices | separate program run inside Wine; built from the `madeira-dock` submodule by `build/madeira-dock/build.sh`, which also writes `dock-notices.txt` beside it; not committed as a binary |
+| `x86_64-opengl/opengl32.dll`, `libgallium_wgl.dll` (Mesa 26.2.4, when built) | MIT and the other licences listed in THIRD-PARTY-NOTICES.md; Madeira's two patches GPL-3.0-or-later | separate x64 PE files linked over Wine's opengl32 stub; built by `build/mesa-d3d12/build.sh`; not committed as binaries |
+| `x86_64-opengl/dxil.dll` (Microsoft DXIL validator, when fetched) | Microsoft proprietary (`LICENSE-dxil.txt` beside it) | unmodified; fetched and hash-checked by `build/mesa-d3d12/build.sh`; not tracked; shipping it is the maintainer's decision |
 
 ## Obligations that follow
 

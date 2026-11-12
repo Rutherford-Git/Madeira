@@ -67,7 +67,7 @@
  *
  * DECODING
  * --------
- * libavcodec, from build/ffmpeg/build.sh (FFmpeg 7.1.1, LGPL configuration:
+ * libavcodec, from build/ffmpeg/build.sh (FFmpeg 7.1.5, LGPL configuration:
  * --disable-gpl --disable-nonfree, wmav1/wmav2/wmapro/wmalossless/xma1/xma2
  * only).  The input media type is a WAVEFORMATEX -- wg_media_type_from_mf()
  * produces it with MFCreateWaveFormatExFromMFMediaType -- so the codec id,
@@ -2729,6 +2729,16 @@ static NTSTATUS wgp_seek( void *args )
     return wgp_status( mav_seek( parser->core, index, set_start, params->start_pos, set_stop, params->stop_pos ) );
 }
 
+/* A 64-bit (ARM64EC) caller has this table by default for the WMA decoder
+ * (virtual_ios.c, ios_wg_64bit_enabled); its parser is refused as before
+ * unless MADEIRA_WG_64BIT=1. */
+static NTSTATUS wgp_create64( void *args )
+{
+    const char *e = getenv( "MADEIRA_WG_64BIT" );
+    if (!(e && e[0] == '1')) return STATUS_NOT_IMPLEMENTED;
+    return wgp_create( args );
+}
+
 /* The index layout below is dlls/winegstreamer/unixlib.h `enum unix_funcs`,
  * entry for entry.  Do not reorder; add new entries only where the header
  * adds them. */
@@ -2736,7 +2746,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     wma_init,                           /* unix_wg_init_gstreamer */
 
-    wgp_create,                         /* unix_wg_parser_create */
+    wgp_create64,                       /* unix_wg_parser_create */
     wgp_destroy,                        /* unix_wg_parser_destroy */
 
     wgp_connect64,                      /* unix_wg_parser_connect */
