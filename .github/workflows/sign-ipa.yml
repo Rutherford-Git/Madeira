@@ -102,6 +102,7 @@ jobs:
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           PROFILE_APP_BASE64: ${{ secrets.PROFILE_APP_BASE64 }}
           PROFILE_HELPER_BASE64: ${{ secrets.PROFILE_HELPER_BASE64 }}
+          PROFILE_MEMORYHOST_BASE64: ${{ secrets.PROFILE_MEMORYHOST_BASE64 }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
         run: |
           for s in P12_BASE64 P12_PASSWORD PROFILE_APP_BASE64 PROFILE_HELPER_BASE64; do
@@ -113,12 +114,18 @@ jobs:
           base64 -d <<< "$P12_BASE64" > "$keys/cert.p12"
           base64 -d <<< "$PROFILE_APP_BASE64" > "$keys/app.mobileprovision"
           base64 -d <<< "$PROFILE_HELPER_BASE64" > "$keys/helper.mobileprovision"
+          profiles=(-m "$keys/app.mobileprovision" -m "$keys/helper.mobileprovision")
+          # Older releases have no MemoryHost; support them without requiring it.
+          if [ -n "$PROFILE_MEMORYHOST_BASE64" ]; then
+            base64 -d <<< "$PROFILE_MEMORYHOST_BASE64" > "$keys/memoryhost.mobileprovision"
+            profiles+=(-m "$keys/memoryhost.mobileprovision")
+          fi
           mkdir out
           # Without -e, zsign signs with each profile's entitlements, which for a
           # development profile include get-task-allow. Without -z it stores the
           # IPA uncompressed, about four times the release's size.
           zsign -k "$keys/cert.p12" -p "$P12_PASSWORD" \
-            -m "$keys/app.mobileprovision" -m "$keys/helper.mobileprovision" \
+            "${profiles[@]}" \
             -b "$BUNDLE_ID" -z 6 -o out/Madeira.ipa input.ipa
 
       - name: Check the signed app
@@ -145,7 +152,7 @@ jobs:
           bundles = {app.rsplit("/", 1)[0]: bundle_id}
           for n in names:
               if re.fullmatch(r"Payload/[^/]+\.app/PlugIns/[^/]+\.appex/Info\.plist", n):
-                  bundles[n.rsplit("/", 1)[0]] = f"{bundle_id}.JITHelper"
+                  bundles[n.rsplit("/", 1)[0]] = plistlib.loads(ipa.read(n))["CFBundleIdentifier"]
           for folder, expected in bundles.items():
               path = f"{folder}/embedded.mobileprovision"
               if path not in names:

@@ -1,0 +1,66 @@
+# Recover signing from an existing source-build artifact without recompiling.
+name: Sign existing source build
+"on":
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Source-build run holding Madeira-unsigned
+        required: true
+        default: '43738008269'
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: madeira-sign-existing-build
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      label: ${{ steps.source.outputs.label }}
+    steps:
+      - name: Verify source build and download the unsigned IPA
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > source.json
+          python3 - <<'PY'
+          import json, os
+          r = json.load(open('source.json'))
+          assert r['path'] == '.github/workflows/build-from-source.yml', 'Not a source build'
+          assert r['head_branch'] == 'main', 'Expected main branch'
+          assert r['event'] == 'workflow_dispatch', 'Expected authorized manual build'
+          assert r['head_repository']['full_name'] == os.environ['GH_REPO'], 'Wrong repository'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('label=main-' + r['head_sha'][:7] + '\n')
+          print('Reusing source build:', r['head_sha'])
+          PY
+          gh run download "$RUN_ID" --repo "$GH_REPO" --name Madeira-unsigned --dir built
+          test -s built/Madeira-unsigned.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Madeira-signing-input
+          path: built/Madeira-unsigned.ipa
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+  sign:
+    needs: prepare
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/sign-ipa.yml
+    with:
+      ipa_artifact: Madeira-signing-input
+      label: ${{ needs.prepare.outputs.label }}
+      bundle_id: com.rutherfordgit.madeira
+      publish: true
+    secrets: inherit
