@@ -1,0 +1,60 @@
+# Re-sign an existing published build without recompiling it.
+name: Renew provisioning profiles
+
+"on":
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Existing signed release to renew without changing the app version
+        required: true
+        default: signed-main-f459097
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: madeira-profile-renewal
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      label: ${{ steps.source.outputs.label }}
+    steps:
+      - name: Download the existing published IPA
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE" =~ ^signed-[A-Za-z0-9._-]+$ ]] || { echo 'Expected an existing signed-* release'; exit 1; }
+          gh release download "$RELEASE" --repo "$GH_REPO" --pattern Madeira.ipa
+          test -s Madeira.ipa
+          echo "label=${RELEASE#signed-}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Madeira-renewal-input
+          path: Madeira.ipa
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  sign:
+    needs: prepare
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/sign-ipa.yml
+    with:
+      ipa_artifact: Madeira-renewal-input
+      label: ${{ needs.prepare.outputs.label }}
+      bundle_id: com.rutherfordgit.madeira
+      publish: true
+    secrets: inherit
